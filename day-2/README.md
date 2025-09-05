@@ -679,3 +679,305 @@ curl --cacert ./certs/ca.crt https://master-01.kubernetes.local:6443/version
   "platform": "linux/amd64"
 }
 ```
+
+## Kubernetes Worker Nodes
+
+Run these command in the each nodes
+
+```bash
+## install some required packages
+sudo apt-get -y install socat conntrack ipset kmod
+
+## disable swap
+sudo swapon --show
+sudo swapoff -a
+
+## create required directory
+sudo mkdir -p \
+    /etc/cni/net.d \
+    /opt/cni/bin \
+    /var/lib/kubelet \
+    /var/lib/kube-proxy \
+    /var/lib/kubernetes \
+    /var/run/kubernetes
+
+## copy required certificates
+sudo cp certs/ca.crt certs/kubelet.crt certs/kubelet.key /var/lib/kubelet
+
+## copy required kubeconfig
+sudo cp kubeconfigs/kubelet.kubeconfig /var/lib/kubelet/kubeconfig
+sudo cp kubeconfigs/kube-proxy.kubeconfig /var/lib/kube-proxy/kubeconfig
+
+## extract and copy crictl binary
+tar -xvf crictl-v1.32.0-linux-amd64.tar.gz
+chmod +x crictl
+sudo mv crictl /usr/local/bin
+
+## extract and copy containerd binary
+tar -xvf containerd-2.1.0-beta.0-linux-amd64.tar.gz
+chmod +x bin/containerd-shim-runc-v2 bin/containerd bin/containerd-stress bin/ctr
+sudo mv bin/containerd-shim-runc-v2 bin/containerd bin/containerd-stress bin/ctr /usr/local/bin
+
+## extract and copy cni plugins binary
+tar -xvf cni-plugins-linux-amd64-v1.6.2.tgz
+chmod +x ipvlan tap loopback host-device portmap \
+    ptp vlan bridge firewall macvlan dummy bandwidth \
+    vrf tuning static dhcp host-local sbr
+sudo mv ipvlan tap loopback host-device portmap \
+    ptp vlan bridge firewall macvlan dummy bandwidth \
+    vrf tuning static dhcp host-local sbr \
+    /opt/cni/bin
+
+## load and configure some kernel module
+sudo modprobe br-netfilter
+echo "br-netfilter" | sudo tee -a /etc/modules-load.d/modules.conf
+echo "net.bridge.bridge-nf-call-iptables = 1" | sudo tee -a /etc/sysctl.d/kubernetes.conf
+echo "net.bridge.bridge-nf-call-ip6tables = 1" | sudo tee -a /etc/sysctl.d/kubernetes.conf
+```
+
+### Configure CNI
+
+```bash
+## create bridge configuration
+sudo nano /etc/cni/net.d/10-bridge.conf
+
+## put this into file content
+{
+  "cniVersion": "1.0.0",
+  "name": "bridge",
+  "type": "bridge",
+  "bridge": "cni0",
+  "isGateway": true,
+  "ipMasq": true,
+  "ipam": {
+    "type": "host-local",
+    "ranges": [
+      [{"subnet": "SUBNET"}]
+    ],
+    "routes": [{"dst": "10.91.12.0/22"}] # make sure this replaced with your node subnet
+  }
+}
+
+## create loopback configuration
+sudo nano /etc/cni/net.d/99-loopback.conf
+
+## put this into file content
+{
+  "cniVersion": "1.1.0",
+  "name": "lo",
+  "type": "loopback"
+}
+```
+
+### Configure Containerd
+
+```bash
+sudo mkdir -p /etc/containerd
+
+## create containerd config
+sudo nano /etc/containerd/config.toml
+
+## put this into file content
+version = 2
+
+[plugins."io.containerd.grpc.v1.cri"]
+  [plugins."io.containerd.grpc.v1.cri".containerd]
+    snapshotter = "overlayfs"
+    default_runtime_name = "runc"
+  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+    runtime_type = "io.containerd.runc.v2"
+  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+    SystemdCgroup = true
+[plugins."io.containerd.grpc.v1.cri".cni]
+  bin_dir = "/opt/cni/bin"
+  conf_dir = "/etc/cni/net.d"
+
+## create containerd systemd files
+sudo nano /etc/systemd/system/containerd.service
+
+## put this into file content
+[Unit]
+Description=containerd container runtime
+Documentation=https://containerd.io
+After=network.target
+
+[Service]
+ExecStartPre=/sbin/modprobe overlay
+ExecStart=/usr/local/bin/containerd
+Restart=always
+RestartSec=5
+Delegate=yes
+KillMode=process
+OOMScoreAdjust=-999
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+
+[Install]
+WantedBy=multi-user.target
+
+## enable and start containerd service
+sudo systemctl daemon-reload
+sudo systemctl enable containerd
+sudo systemctl restart containerd
+
+## check containerd status
+sudo systemctl status containerd
+sudo journalctl -xe -u containerd
+```
+
+### Kubelet
+
+```bash
+## create kubelet config file
+sudo nano /var/lib/kubelet/config.yaml
+
+## put this into file content
+---
+kind: KubeletConfiguration
+apiVersion: kubelet.config.k8s.io/v1beta1
+address: "0.0.0.0"
+authentication:
+  anonymous:
+    enabled: false
+  webhook:
+    enabled: true
+  x509:
+    clientCAFile: "/var/lib/kubelet/ca.crt"
+authorization:
+  mode: Webhook
+cgroupDriver: systemd
+containerRuntimeEndpoint: "unix:///var/run/containerd/containerd.sock"
+enableServer: true
+failSwapOn: false
+maxPods: 16
+memorySwap:
+  swapBehavior: NoSwap
+port: 10250
+resolvConf: "/etc/resolv.conf"
+registerNode: true
+runtimeRequestTimeout: "15m"
+tlsCertFile: "/var/lib/kubelet/kubelet.crt"
+tlsPrivateKeyFile: "/var/lib/kubelet/kubelet.key"
+
+## create kubelet systemd file
+sudo nano /etc/systemd/system/kubelet.service
+
+## put this into file content
+[Unit]
+Description=Kubernetes Kubelet
+Documentation=https://github.com/kubernetes/kubernetes
+After=containerd.service
+Requires=containerd.service
+
+[Service]
+ExecStart=/usr/local/bin/kubelet \
+  --config=/var/lib/kubelet/config.yaml \
+  --kubeconfig=/var/lib/kubelet/kubeconfig \
+  --v=2
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+
+## enable and start kubelet service
+sudo systemctl daemon-reload
+sudo systemctl enable kubelet
+sudo systemctl restart kubelet
+
+## check kubelet status
+sudo systemctl status kubelet
+sudo journalctl -xe -u kubelet
+```
+
+### Kubeproxy
+
+```bash
+## create kube-proxy configuration file
+sudo nano /var/lib/kube-proxy/config.yaml
+
+## put this into file content
+---
+kind: KubeProxyConfiguration
+apiVersion: kubeproxy.config.k8s.io/v1alpha1
+clientConnection:
+  kubeconfig: "/var/lib/kube-proxy/kubeconfig"
+mode: "iptables"
+clusterCIDR: "10.201.0.0/16" # Cluster CIDR must be matched with ClusterCIDR on kube-controller-manager
+
+## create kube-proxy systemd file
+sudo nano /etc/systemd/system/kube-proxy.service
+
+## put this into file content
+[Unit]
+Description=Kubernetes Kube Proxy
+Documentation=https://github.com/kubernetes/kubernetes
+
+[Service]
+ExecStart=/usr/local/bin/kube-proxy \
+  --config=/var/lib/kube-proxy/config.yaml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+
+## enable and start kube-proxy service
+sudo systemctl daemon-reload
+sudo systemctl enable kube-proxy
+sudo systemctl restart kube-proxy
+
+## check kube-proxy status
+sudo systemctl status kube-proxy
+sudo journalctl -xe -u kube-proxy
+```
+
+### Verification
+
+At this point, the node should be registered to api server, however the node status still `NotReady` which is normal because we still need to install CNI to this cluster.
+
+```bash
+kubectl get nodes --kubeconfig kubeconfigs/admin.kubeconfig
+
+## expected output
+NAME      STATUS     ROLES    AGE     VERSION
+node-01   NotReady   <none>   9m16s   v1.32.3
+```
+
+## Configure Kubectl For Remote Access
+
+Run these commands in your local environment, to setup remote access to our cluster.
+
+```bash
+## add master ip address to /etc/hosts
+## append this in your /etc/hosts file
+10.91.12.53     server.kubernetes.local
+
+## setup kubeconfig
+kubectl config set-cluster learn-k8s \
+    --certificate-authority=./certs/ca.crt \
+    --embed-certs=true \
+    --server=https://server.kubernetes.local:6443 \
+    --kubeconfig=./kubeconfigs/kubeconfig
+
+kubectl config set-credentials admin \
+    --client-certificate=./certs/admin.crt \
+    --client-key=./certs/admin.key \
+    --kubeconfig=./kubeconfigs/kubeconfig
+
+kubectl config set-context learn-k8s \
+    --cluster=learn-k8s \
+    --user=admin \
+    --kubeconfig=./kubeconfigs/kubeconfig
+
+kubectl config use-context learn-k8s \
+    --kubeconfig=./kubeconfigs/kubeconfig
+
+## now test accessing the cluster from your local environment
+kubectl get nodes --kubeconfig ./kubeconfigs/kubeconfig
+
+### expected output
+NAME      STATUS     ROLES    AGE   VERSION
+node-01   NotReady   <none>   14m   v1.32.3
+```

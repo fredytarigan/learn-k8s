@@ -974,10 +974,74 @@ kubectl config set-context learn-k8s \
 kubectl config use-context learn-k8s \
     --kubeconfig=./kubeconfigs/kubeconfig
 
-## now test accessing the cluster from your local environment
-kubectl get nodes --kubeconfig ./kubeconfigs/kubeconfig
+export KUBECONFIG=./kubeconfigs/kubeconfig
 
+## now test accessing the cluster from your local environment
+kubectl get nodes
 ### expected output
 NAME      STATUS     ROLES    AGE   VERSION
 node-01   NotReady   <none>   14m   v1.32.3
 ```
+
+## Installing CNI ( Cilium )
+
+First, make sure helm is available at your system and is running helm v3.
+
+```bash
+helm version
+
+## add cilium helm repository
+helm repo add cilium https://helm.cilium.io/
+
+## install cilium
+helm install cilium cilium/cilium --version 1.18.1 \
+  --namespace kube-system \
+  --set envoy.enabled=false \
+  --set k8sServiceHost=master-01.kubernetes.local \
+  --set k8sServicePort=6443
+
+## take a moment to wait until cilium component is ready.
+## since we only have a single node, there will be a pending pod for cilium-operator
+## this is normal because by default, cilium-operator replica is set to 2
+kubectl -n kube-system get pods | grep cilium
+
+## expected output something like this
+cilium-62ndx                       1/1     Running   0          2m9s
+cilium-operator-56cb5f76bb-b9w2v   1/1     Running   0          2m9s
+cilium-operator-56cb5f76bb-nn86q   0/1     Pending   0          2m9s
+
+## once the cilium pods is ready, the node now become `Ready`
+kubectl get nodes
+
+NAME      STATUS   ROLES    AGE   VERSION
+node-01   Ready    <none>   30m   v1.32.3
+```
+
+## Testing
+
+Let's test the basic functionality of our cluster.
+
+### Create a deployment
+
+```bash
+kubectl create deployment nginx --image=nginx --replicas=2
+
+## wait until pod is ready
+kubectl get pods
+
+## expected some outputs
+NAME                     READY   STATUS    RESTARTS   AGE
+nginx-5869d7778c-kmcbh   1/1     Running   0          29s
+nginx-5869d7778c-msq29   1/1     Running   0          29s
+
+## let's try to port-forward from one pod
+kubectl port-forward nginx-5869d7778c-kmcbh 8080:80
+
+## expected some outputs
+Forwarding from 127.0.0.1:8080 -> 80
+Forwarding from [::1]:8080 -> 80
+Handling connection for 8080
+Handling connection for 8080
+```
+
+Open your browser, and access http://localhost:8080, you should be able to see the nginx welcome page.

@@ -14,8 +14,8 @@ sudo nano /etc/hosts
 Add (append) lines below to the content of `/etc/hosts`
 
 ```bash
-10.91.12.54 master-01.kubernetes.local master-01
-10.91.12.55 node-01.kubernetes.local node-01
+10.91.12.53 master-01.kubernetes.local master-01
+10.91.12.51 node-01.kubernetes.local node-01
 ```
 
 Try to ping the host by its hostname
@@ -33,43 +33,54 @@ Create a new directory named k8s/1.32.3
 
 ```bash
 mkdir -p k8s/1.32.3
+cd k8s/1.32.3
 ```
 
 ```bash
-## Server components
+## run this on both master and node
 curl -L https://dl.k8s.io/v1.32.3/bin/linux/amd64/kubectl -o kubectl
+
+## Server components, run this on master only
 curl -L https://dl.k8s.io/v1.32.3/bin/linux/amd64/kube-apiserver -o kube-apiserver
 curl -L https://dl.k8s.io/v1.32.3/bin/linux/amd64/kube-controller-manager -o kube-controller-manager
 curl -L https://dl.k8s.io/v1.32.3/bin/linux/amd64/kube-scheduler -o kube-scheduler
 
-## Node components
+## Node components, run this on node only
 curl -L https://dl.k8s.io/v1.32.3/bin/linux/amd64/kube-proxy -o kube-proxy
 curl -L https://dl.k8s.io/v1.32.3/bin/linux/amd64/kubelet -o kubelet
 
-## Container components
+## Container components, run this on node only
 curl -L https://github.com/kubernetes-sigs/cri-tools/releases/download/v1.32.0/crictl-v1.32.0-linux-amd64.tar.gz -o crictl-v1.32.0-linux-amd64.tar.gz
 curl -L https://github.com/opencontainers/runc/releases/download/v1.3.0-rc.1/runc.amd64 -o runc
 curl -L https://github.com/containernetworking/plugins/releases/download/v1.6.2/cni-plugins-linux-amd64-v1.6.2.tgz -o cni-plugins-linux-amd64-v1.6.2.tgz
 curl -L https://github.com/containerd/containerd/releases/download/v2.1.0-beta.0/containerd-2.1.0-beta.0-linux-amd64.tar.gz -o containerd-2.1.0-beta.0-linux-amd64.tar.gz
 
-## Etcd components
+## Etcd components, run this on master only
 curl -L https://github.com/etcd-io/etcd/releases/download/v3.6.0-rc.3/etcd-v3.6.0-rc.3-linux-amd64.tar.gz -o etcd-v3.6.0-rc.3-linux-amd64.tar.gz
 ```
 
-Make all binary executeable
+Make all binary executeable and move to `/usr/local/bin`
 
 ```bash
-chmod +x kubectl kube-apiserver kube-controller-manager kube-scheduler kubelet kube-proxy runc
+
+## run this on master
+chmod +x kubectl kube-apiserver kube-controller-manager kube-scheduler
+sudo mv kubectl kube-apiserver kube-controller-manager kube-scheduler /usr/local/bin
+
+## run this on node
+chmod +x kubectl kubelet kube-proxy runc
+sudo mv kubectl kubelet kube-proxy runc /usr/local/bin
 ```
 
 Try checking kubectl version
 
 ```bash
-./kubectl version --client
+kubectl version --client
 ```
 
 ## Generate Public Key Infrastructure
 
+Generate certificate in your local host but make sure `openssl` and `kubectl` is available in your local machine.
 Make adjustment to ca.conf file and create dedicated folder to hold the certificates
 
 ```bash
@@ -189,20 +200,20 @@ openssl x509 -req -days 3653 -in ./certs/admin.csr \
 
 ```bash
 # replace 'debian' with your ssh username
-ssh debian@10.91.12.54 mkdir -p /home/debian/certs
-scp ./certs/ca.key ./certs/ca.crt ./certs/kube-apiserver.key ./certs/kube-apiserver.crt ./certs/kube-controller-manager.crt ./certs/kube-controller-manager.key ./certs/kube-scheduler.crt ./certs/kube-scheduler.key ./certs/service-accounts.key ./certs/service-accounts.crt debian@10.91.12.54:/home/debian/certs/
+ssh debian@10.91.12.53 mkdir -p /home/debian/k8s/1.32.3/certs
+scp ./certs/ca.key ./certs/ca.crt ./certs/kube-apiserver.key ./certs/kube-apiserver.crt ./certs/kube-controller-manager.crt ./certs/kube-controller-manager.key ./certs/kube-scheduler.crt ./certs/kube-scheduler.key ./certs/service-accounts.key ./certs/service-accounts.crt ./certs/admin.crt ./certs/admin.key debian@10.91.12.53:/home/debian/k8s/1.32.3/certs/
 ```
 
 ### Distribute the client certificates
 
 ```bash
 # replace 'debian' with your ssh username
-ssh debian@10.91.12.55 mkdir -p /home/debian/certs
-scp ./certs/ca.crt debian@10.91.12.55:/home/debian/certs/ca.crt
-scp ./certs/node-01.crt debian@10.91.12.55:/home/debian/certs/kubelet.crt
-scp ./certs/node-01.key debian@10.91.12.55:/home/debian/certs/kubelet.key
-scp ./certs/kube-proxy.crt debian@10.91.12.55:/home/debian/certs/kube-proxy.crt
-scp ./certs/kube-proxy.key debian@10.91.12.55:/home/debian/certs/kube-proxy.key
+ssh debian@10.91.12.51 mkdir -p /home/debian/k8s/1.32.3/certs
+scp ./certs/ca.crt debian@10.91.12.51:/home/debian/k8s/1.32.3/certs/ca.crt
+scp ./certs/node-01.crt debian@10.91.12.51:/home/debian/k8s/1.32.3/certs/kubelet.crt
+scp ./certs/node-01.key debian@10.91.12.51:/home/debian/k8s/1.32.3/certs/kubelet.key
+scp ./certs/kube-proxy.crt debian@10.91.12.51:/home/debian/k8s/1.32.3/certs/kube-proxy.crt
+scp ./certs/kube-proxy.key debian@10.91.12.51:/home/debian/k8s/1.32.3/certs/kube-proxy.key
 ```
 
 ## Generate Kubernetes Configuration Files
@@ -215,61 +226,76 @@ Generate kubeconfig directory
 mkdir -p kubeconfigs
 ```
 
-Copy master binary to /usr/local/bin
-
-```bash
-sudo cp kubectl /usr/local/bin/kubectl
-sudo cp kube-apiserver /usr/local/bin/kube-apiserver
-sudo cp kube-controller-manager /usr/local/bin/kube-controller-manager
-sudo cp kube-scheduler /usr/local/bin/kube-scheduler
-```
-
 #### kube-controller-manager
 
 ```bash
-./kubectl config set-cluster learn-k8s \
+kubectl config set-cluster learn-k8s \
     --certificate-authority=./certs/ca.crt \
     --embed-certs=true \
     --server=https://master-01.kubernetes.local:6443 \
     --kubeconfig=./kubeconfigs/kube-controller-manager.kubeconfig
 
-./kubectl config set-credentials system:kube-controller-manager \
+kubectl config set-credentials system:kube-controller-manager \
     --client-certificate=./certs/kube-controller-manager.crt \
     --client-key=./certs/kube-controller-manager.key \
     --embed-certs=true \
     --kubeconfig=./kubeconfigs/kube-controller-manager.kubeconfig
 
-./kubectl config set-context default \
+kubectl config set-context default \
     --cluster=learn-k8s \
     --user=system:kube-controller-manager \
     --kubeconfig=./kubeconfigs/kube-controller-manager.kubeconfig
 
-./kubectl config use-context default \
+kubectl config use-context default \
     --kubeconfig=./kubeconfigs/kube-controller-manager.kubeconfig
 ```
 
 #### kube-scheduler
 
 ```bash
-./kubectl config set-cluster learn-k8s \
+kubectl config set-cluster learn-k8s \
     --certificate-authority=./certs/ca.crt \
     --embed-certs=true \
     --server=https://master-01.kubernetes.local:6443 \
     --kubeconfig=./kubeconfigs/kube-scheduler.kubeconfig
 
-./kubectl config set-credentials system:kube-scheduler \
+kubectl config set-credentials system:kube-scheduler \
     --client-certificate=./certs/kube-scheduler.crt \
     --client-key=./certs/kube-scheduler.key \
     --embed-certs=true \
     --kubeconfig=./kubeconfigs/kube-scheduler.kubeconfig
 
-./kubectl config set-context default \
+kubectl config set-context default \
     --cluster=learn-k8s \
     --user=system:kube-scheduler \
     --kubeconfig=./kubeconfigs/kube-scheduler.kubeconfig
 
-./kubectl config use-context default \
+kubectl config use-context default \
     --kubeconfig=./kubeconfigs/kube-scheduler.kubeconfig
+```
+
+#### Admin user
+
+```bash
+kubectl config set-cluster learn-k8s \
+    --certificate-authority=./certs/ca.crt \
+    --embed-certs=true \
+    --server=https://master-01.kubernetes.local:6443 \
+    --kubeconfig=./kubeconfigs/admin.kubeconfig
+
+kubectl config set-credentials admin \
+    --client-certificate=./certs/admin.crt \
+    --client-key=./certs/admin.key \
+    --embed-certs=true \
+    --kubeconfig=./kubeconfigs/admin.kubeconfig
+
+kubectl config set-context default \
+    --cluster=learn-k8s \
+    --user=admin \
+    --kubeconfig=./kubeconfigs/admin.kubeconfig
+
+kubectl config use-context default \
+    --kubeconfig=./kubeconfigs/admin.kubeconfig
 ```
 
 ### Run on Nodes
@@ -278,14 +304,6 @@ Generate kubeconfig directory
 
 ```bash
 mkdir -p kubeconfigs
-```
-
-Copy node binary to /usr/local/bin
-
-```bash
-sudo cp kubectl /usr/local/bin/kubectl
-sudo cp kubelet /usr/local/bin/kubelet
-sudo cp kube-proxy /usr/local/bin/kube-proxy
 ```
 
 ### kubelet
@@ -315,49 +333,25 @@ kubectl config use-context default \
 ### kube-proxy
 
 ```bash
-./kubectl config set-cluster learn-k8s \
+kubectl config set-cluster learn-k8s \
     --certificate-authority=./certs/ca.crt \
     --embed-certs=true \
     --server=https://master-01.kubernetes.local:6443 \
     --kubeconfig=./kubeconfigs/kube-proxy.kubeconfig
 
-./kubectl config set-credentials system:kube-proxy \
+kubectl config set-credentials system:kube-proxy \
     --client-certificate=./certs/kube-proxy.crt \
     --client-key=./certs/kube-proxy.key \
     --embed-certs=true \
     --kubeconfig=./kubeconfigs/kube-proxy.kubeconfig
 
-./kubectl config set-context default \
+kubectl config set-context default \
     --cluster=learn-k8s \
     --user=system:kube-proxy \
     --kubeconfig=./kubeconfigs/kube-proxy.kubeconfig
 
-./kubectl config use-context default \
+kubectl config use-context default \
     --kubeconfig=./kubeconfigs/kube-proxy.kubeconfig
-```
-
-### Run on Master or Local
-
-```bash
-./kubectl config set-cluster learn-k8s \
-    --certificate-authority=./certs/ca.crt \
-    --embed-certs=true \
-    --server=https://master-01.kubernetes.local:6443 \
-    --kubeconfig=./kubeconfigs/admin.kubeconfig
-
-./kubectl config set-credentials admin \
-    --client-certificate=./certs/admin.crt \
-    --client-key=./certs/admin.key \
-    --embed-certs=true \
-    --kubeconfig=./kubeconfigs/admin.kubeconfig
-
-./kubectl config set-context default \
-    --cluster=learn-k8s \
-    --user=admin \
-    --kubeconfig=./kubeconfigs/admin.kubeconfig
-
-./kubectl config use-context default \
-    --kubeconfig=./kubeconfigs/admin.kubeconfig
 ```
 
 ## Generate Data Encryption Config
@@ -397,13 +391,14 @@ Extract downloaded etcd
 tar -xvf etcd-v3.6.0-rc.3-linux-amd64.tar.gz
 
 ## create required directory for etcd
-mkdir -p /etc/etcd /var/lib/etcd
-chmod 700 /var/lib/etcd
+sudo mkdir -p /etc/etcd /var/lib/etcd
+sudo chmod 700 /var/lib/etcd
 
-cp ./etcd-v3.6.0-rc.3-linux-amd64/etcd /usr/local/bin
-cp ./etcd-v3.6.0-rc.3-linux-amd64/etcdctl /usr/local/bin
+sudo cp ./etcd-v3.6.0-rc.3-linux-amd64/etcd /usr/local/bin
+sudo cp ./etcd-v3.6.0-rc.3-linux-amd64/etcdctl /usr/local/bin
+sudo cp ./etcd-v3.6.0-rc.3-linux-amd64/etcdutl /usr/local/bin
 
-chmod +x /usr/local/bin/etcd /usr/local/bin/etcdctl
+sudo chmod +x /usr/local/bin/etcd /usr/local/bin/etcdctl /usr/local/bin/etcdutl
 
 ## create etcd systemd files
 sudo nano /etc/systemd/system/etcd.service
